@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Horse Runner 🐴</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    canvas { display: block; max-width: 100%; image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const WIDTH         = 800;
+const HEIGHT        = 400;
+const GROUND_Y      = 320;
+const GROUND_LINE_Y = 380;
+const GRAVITY       = 0.8;
+const JUMP_FORCE    = -15;
+const DASH_W        = 40;
+const DASH_GAP      = 30;
+const OBSTACLE_MIN  = 60;
+const OBSTACLE_MAX  = 120;
+const SKY_MIN       = 130;
+const SKY_MAX       = 220;
+
+// Géométrie des obstacles aériens
+// On utilise la tête/cou comme zone de collision debout (top = horse_y+2 = 322)
+// ce qui permet de remonter l'obstacle bien au-dessus du sol.
+//
+// ┌─ y=245 (semi-transparent)────┐
+// │  colonne depuis le plafond   │
+// ├─ y=245 (solide) ─────────────┤
+// │  zone dangereuse (80px)      │
+// └─ y=325 ──────────┬───────────┘
+//    cheval debout    │ head top = horse_y+2 = 322 → 322 < 325 → TOUCHE
+//    cheval baissé    │ hitbox top = horse_y+36 = 356 → 356 > 325 → PASSE
+const SKY_OBS_BOTTOM = GROUND_Y + 5;  // 325
+const SKY_OBS_H      = 80;
+
+const canvas = document.getElementById('c');
+canvas.width  = WIDTH;
+canvas.height = HEIGHT;
+const ctx = canvas.getContext('2d');
+
+// ── Audio ────────────────────────────────────────────────────
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+const FREQ = {
+  C4: 261.63, E4: 329.63, G4: 392.00,
+  A4: 440.00, C5: 523.25, E5: 659.25,
+};
+const MELODY = [
+  ['G4',0.12],['G4',0.12],['C5',0.12],['E5',0.24],
+  ['C5',0.12],['A4',0.12],['G4',0.12],['E4',0.24],
+  ['G4',0.12],['A4',0.12],['C5',0.12],['E5',0.24],
+  ['C5',0.12],['G4',0.12],['E4',0.12],['C4',0.36],
+];
+const GAMEOVER_MELODY = [
+  ['E5',0.18],['C5',0.18],['A4',0.18],
+  ['G4',0.18],['E4',0.18],['C4',0.45],
+];
+
+function scheduleNotes(melody, startTime, volume = 0.20) {
+  let t = startTime;
+  for (const [name, dur] of melody) {
+    for (const [mult, vol] of [[1, 0.7],[2, 0.3]]) {
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = FREQ[name] * mult;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(volume * vol, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur * 0.95);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.02);
+    }
+    t += dur;
+  }
+  return t;
+}
+
+let musicPlaying    = false;
+let musicScheduleId = null;
+let nextLoopAt      = 0;
+
+function startMusic() {
+  if (musicPlaying) return;
+  musicPlaying = true;
+  nextLoopAt   = scheduleNotes(MELODY, audioCtx.currentTime + 0.05);
+  musicScheduleId = setInterval(() => {
+    if (!musicPlaying) return;
+    if (nextLoopAt - audioCtx.currentTime < 0.5)
+      nextLoopAt = scheduleNotes(MELODY, nextLoopAt);
+  }, 200);
+}
+
+function stopMusic() {
+  musicPlaying = false;
+  clearInterval(musicScheduleId);
+  musicScheduleId = null;
+}
+
+function playGameOver() {
+  scheduleNotes(GAMEOVER_MELODY, audioCtx.currentTime + 0.05, 0.30);
+}
+
+// ── Décor ────────────────────────────────────────────────────
+function makeCloud() {
+  return { x: WIDTH + Math.random()*200, y: 20+Math.random()*120, size: 28+Math.random()*27 };
+}
+function makeFly() {
+  return { x: WIDTH+Math.random()*300, y: 50+Math.random()*170, speed: 1.5+Math.random()*2, buzz: Math.random()*Math.PI*2 };
+}
+
+let clouds = Array.from({length:5}, () => ({x:Math.random()*WIDTH, y:20+Math.random()*120, size:28+Math.random()*27}));
+let flies  = Array.from({length:6}, () => { const f=makeFly(); f.x=Math.random()*WIDTH; return f; });
+
+function drawCloud(x, y, size) {
+  ctx.fillStyle = 'rgb(255,182,203)';
+  ctx.beginPath(); ctx.ellipse(x+size,          y+size/2,          size,   size/2,  0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+size,           y-size/3+size*0.4, size/2, size*0.4,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgb(240,150,170)';
+  ctx.beginPath(); ctx.ellipse(x+size/4+size/2,  y+size/2+size/6,   size/2, size/6,  0,0,Math.PI*2); ctx.fill();
+}
+
+function drawFly(x, y) {
+  ctx.fillStyle = 'rgb(20,20,20)';
+  ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(80,80,110,0.75)';
+  ctx.beginPath(); ctx.ellipse(x-5, y-2.5, 3, 1.5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+5, y-2.5, 3, 1.5, 0, 0, Math.PI*2); ctx.fill();
+}
+
+// ── Cheval debout ────────────────────────────────────────────
+function drawHorse(x, y, frame, jumping) {
+  const br = 'rgb(139,69,19)', dk = 'rgb(101,50,14)';
+  ctx.fillStyle = br;
+  ctx.fillRect(x+5, y+18,44,24); ctx.fillRect(x+38,y+8, 12,18);
+  ctx.fillRect(x+44,y+2, 16,14);
+  ctx.fillStyle='rgb(0,0,0)'; ctx.fillRect(x+56,y+5,3,3);
+  ctx.fillStyle=dk;
+  ctx.fillRect(x+58,y+10,3,2); ctx.fillRect(x+36,y+4,10,8); ctx.fillRect(x+2,y+14,6,18);
+
+  const lt = y+42;
+  ctx.strokeStyle=dk; ctx.lineWidth=6; ctx.lineCap='round';
+  const legs = jumping
+    ? [[10,4],[20,4],[34,4],[44,4]].map(([ox])=>[ox,4])  // repliées
+    : frame===0 ? [[10,4],[20,-4],[34,-4],[44,4]] : [[10,-4],[20,4],[34,4],[44,-4]];
+  if (jumping) {
+    for (const ox of [10,20,34,44]) {
+      ctx.beginPath(); ctx.moveTo(x+ox,lt-6); ctx.lineTo(x+ox+4,lt+4); ctx.stroke();
+    }
+  } else {
+    for (const [ox,lean] of legs) {
+      ctx.beginPath(); ctx.moveTo(x+ox,lt); ctx.lineTo(x+ox+lean,lt+18); ctx.stroke();
+    }
+  }
+}
+
+// ── Cheval baissé ────────────────────────────────────────────
+// horse_y = GROUND_Y = 320 ; tout est abaissé / aplati
+// Hitbox ciel : (x+34, y+36, 24, 12) → top=356 > SKY_OBS_BOTTOM=325 → PASSE
+function drawHorseDuck(x, y) {
+  const br = 'rgb(139,69,19)', dk = 'rgb(101,50,14)';
+  ctx.fillStyle = br;
+  ctx.fillRect(x+2, y+32,54,16); // corps plat  352–368
+  ctx.fillRect(x+44,y+24,10,13); // cou court   344–357
+  ctx.fillRect(x+50,y+20,14,11); // tête basse  340–351
+  ctx.fillStyle='rgb(0,0,0)'; ctx.fillRect(x+60,y+22,3,3);
+  ctx.fillStyle=dk;
+  ctx.fillRect(x+61,y+27,3,2);  // narine
+  ctx.fillRect(x+40,y+22,10,6); // crinière
+  ctx.fillRect(x+1, y+28,6,16); // queue
+
+  const lt = y+48; // 368
+  ctx.strokeStyle=dk; ctx.lineWidth=6; ctx.lineCap='round';
+  for (const [ox,lean] of [[8,8],[18,-7],[30,-7],[44,8]]) {
+    ctx.beginPath(); ctx.moveTo(x+ox,lt); ctx.lineTo(x+ox+lean,lt+14); ctx.stroke(); // ~382
+  }
+}
+
+// ── Obstacle aérien ──────────────────────────────────────────
+function drawSkyObs(obs) {
+  const dangerTop = SKY_OBS_BOTTOM - SKY_OBS_H; // 245
+
+  // Colonne fantôme depuis le plafond (semi-transparente)
+  ctx.fillStyle = 'rgba(55,110,165,0.22)';
+  ctx.fillRect(obs.x, 0, obs.w, dangerTop);
+
+  // Zone dangereuse solide
+  ctx.fillStyle = 'rgb(55,110,165)';
+  ctx.fillRect(obs.x, dangerTop, obs.w, SKY_OBS_H);
+  // reflet haut
+  ctx.fillStyle = 'rgb(95,155,210)';
+  ctx.fillRect(obs.x+2, dangerTop+2, obs.w-4, 10);
+  // ombre bas (fond plat, pas de stalactite)
+  ctx.fillStyle = 'rgb(30,65,110)';
+  ctx.fillRect(obs.x, SKY_OBS_BOTTOM-8, obs.w, 8);
+}
+
+// ── Caca ─────────────────────────────────────────────────────
+let poops = [];
+
+function spawnPoop(x, y) {
+  for (let i = 0; i < 2; i++) {
+    poops.push({
+      x:        x + 3 + (Math.random()-0.5)*4,
+      y:        y + 20 + (Math.random()-0.5)*3,
+      vx:      -0.4 - Math.random()*1.2,
+      vy:       (Math.random()-0.5) * 2,
+      r:        2.5 + Math.random()*2,
+      life:     1.0,
+      grounded: false,
+    });
+  }
+}
+
+function updatePoops() {
+  for (const p of poops) {
+    if (!p.grounded) {
+      p.vy += 0.35;
+      p.x  += p.vx;
+      p.y  += p.vy;
+      if (p.y >= GROUND_LINE_Y) { p.y = GROUND_LINE_Y; p.grounded = true; }
+    }
+    p.life -= p.grounded ? 0.014 : 0.007;
+  }
+  poops = poops.filter(p => p.life > 0);
+}
+
+function drawPoops() {
+  for (const p of poops) {
+    ctx.globalAlpha = Math.min(p.life, 0.92);
+    ctx.fillStyle   = 'rgb(101,67,33)';
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── État du jeu ──────────────────────────────────────────────
+let bestScore = parseInt(localStorage.getItem('horse_runner_best') || '0');
+
+function resetGame() {
+  return {
+    horse_y:          GROUND_Y,
+    vel_y:            0,
+    on_ground:        true,
+    duck:             false,
+    obstacles:        [],
+    obstacle_timer:   0,
+    next_obstacle_in: OBSTACLE_MIN + Math.floor(Math.random()*(OBSTACLE_MAX-OBSTACLE_MIN)),
+    sky_obstacles:    [],
+    sky_timer:        0,
+    next_sky_in:      SKY_MIN + Math.floor(Math.random()*(SKY_MAX-SKY_MIN)),
+    score:            0,
+    speed:            6,
+    ground_offset:    0,
+    anim_frame:       0,
+    anim_timer:       0,
+  };
+}
+
+const HORSE_X     = 100;
+let state         = 'start';
+let g             = resetGame();
+let audioUnlocked = false;
+let duckHeld      = false;
+
+function unlockAudio() {
+  if (!audioUnlocked) { audioCtx.resume(); audioUnlocked = true; }
+}
+
+// ── Clavier ──────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (['Space','ArrowUp','ArrowDown','Enter'].includes(e.code)) e.preventDefault();
+  unlockAudio();
+  if (state === 'start') {
+    state = 'playing'; startMusic();
+  } else if (state === 'playing') {
+    if ((e.code === 'Space' || e.code === 'ArrowUp') && g.on_ground && !duckHeld) {
+      g.vel_y = JUMP_FORCE; g.on_ground = false;
+    }
+    if (e.code === 'ArrowDown') duckHeld = true;
+  } else if (state === 'gameover') {
+    if (e.code === 'Space' || e.code === 'Enter') {
+      g = resetGame(); state = 'playing'; startMusic();
+    }
+  }
+});
+
+document.addEventListener('keyup', e => {
+  if (e.code === 'ArrowDown') duckHeld = false;
+});
+
+// ── Tactile ──────────────────────────────────────────────────
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  unlockAudio();
+  if (state === 'start') { state = 'playing'; startMusic(); return; }
+  if (state === 'gameover') { g = resetGame(); state = 'playing'; startMusic(); return; }
+  // bas de l'écran = se baisser, reste = sauter
+  const rect   = canvas.getBoundingClientRect();
+  const touchY = (e.touches[0].clientY - rect.top) / rect.height;
+  if (touchY > 0.65) {
+    duckHeld = true;
+  } else if (g.on_ground && !duckHeld) {
+    g.vel_y = JUMP_FORCE; g.on_ground = false;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  duckHeld = false;
+}, { passive: false });
+
+// ── Boucle principale ────────────────────────────────────────
+function loop() {
+  // Décor
+  for (const c of clouds) c.x -= 0.8;
+  clouds = clouds.filter(c => c.x + c.size*2 > 0);
+  while (clouds.length < 5) clouds.push(makeCloud());
+
+  for (const f of flies) { f.x -= f.speed; f.buzz += 0.15; f.y += Math.sin(f.buzz)*0.8; }
+  flies = flies.filter(f => f.x > -10);
+  while (flies.length < 6) flies.push(makeFly());
+
+  // Jeu
+  if (state === 'playing') {
+    g.score += 1;
+    g.speed  = 6 + Math.floor(g.score / 200);
+
+    // Duck (seulement au sol)
+    g.duck = duckHeld && g.on_ground;
+
+    // Animation foulée
+    g.anim_timer += 1;
+    if (g.on_ground && g.anim_timer >= 8) { g.anim_frame = 1-g.anim_frame; g.anim_timer = 0; }
+
+    // Physique verticale
+    if (!g.duck) {
+      g.vel_y   += GRAVITY;
+      g.horse_y += g.vel_y;
+    }
+    if (g.horse_y >= GROUND_Y) { g.horse_y = GROUND_Y; g.vel_y = 0; g.on_ground = true; }
+
+    // Caca pendant le saut
+    if (!g.on_ground && Math.random() < 0.10) spawnPoop(HORSE_X, Math.floor(g.horse_y));
+    updatePoops();
+
+    // Sol animé
+    g.ground_offset = ((g.ground_offset - g.speed) % (DASH_W+DASH_GAP) + (DASH_W+DASH_GAP)) % (DASH_W+DASH_GAP);
+
+    // Spawn obstacles sol
+    g.obstacle_timer += 1;
+    if (g.obstacle_timer >= g.next_obstacle_in) {
+      g.obstacles.push({ x:WIDTH, w:20+Math.floor(Math.random()*21), h:25+Math.floor(Math.random()*31) });
+      g.obstacle_timer   = 0;
+      g.next_obstacle_in = OBSTACLE_MIN + Math.floor(Math.random()*(OBSTACLE_MAX-OBSTACLE_MIN));
+    }
+    for (const o of g.obstacles) o.x -= g.speed;
+    g.obstacles = g.obstacles.filter(o => o.x+o.w > 0);
+
+    // Spawn obstacles aériens
+    g.sky_timer += 1;
+    if (g.sky_timer >= g.next_sky_in) {
+      g.sky_obstacles.push({ x:WIDTH, w:50+Math.floor(Math.random()*45) });
+      g.sky_timer   = 0;
+      g.next_sky_in = SKY_MIN + Math.floor(Math.random()*(SKY_MAX-SKY_MIN));
+    }
+    for (const o of g.sky_obstacles) o.x -= g.speed;
+    g.sky_obstacles = g.sky_obstacles.filter(o => o.x+o.w > 0);
+
+    // Hitbox obstacles au sol : corps (saut par-dessus)
+    const ghx = HORSE_X + 5,  ghw = 44;
+    const ghy = g.duck ? g.horse_y + 30 : g.horse_y + 18;
+    const ghh = g.duck ? 20 : 24;
+
+    // Hitbox obstacles aériens : tête+cou debout, très plat baissé (passe dessous)
+    const shx = HORSE_X + 34, shw = 24;
+    const shy = g.duck ? g.horse_y + 36 : g.horse_y + 2;  // 356 vs 322
+    const shh = g.duck ? 12 : 40;
+
+    let dead = false;
+
+    for (const o of g.obstacles) {
+      const oy = GROUND_LINE_Y - o.h;
+      if (ghx < o.x+o.w && ghx+ghw > o.x && ghy < oy+o.h && ghy+ghh > oy) { dead=true; break; }
+    }
+    if (!dead) {
+      const skyTop = SKY_OBS_BOTTOM - SKY_OBS_H;
+      for (const o of g.sky_obstacles) {
+        if (shx < o.x+o.w && shx+shw > o.x && shy < SKY_OBS_BOTTOM && shy+shh > skyTop) { dead=true; break; }
+      }
+    }
+
+    if (dead) {
+      if (g.score > bestScore) { bestScore = g.score; localStorage.setItem('horse_runner_best', bestScore); }
+      state = 'gameover'; stopMusic(); playGameOver();
+    }
+  }
+
+  // ── Dessin ───────────────────────────────────────────────
+  ctx.fillStyle = 'rgb(220,235,255)';
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  for (const c of clouds) drawCloud(c.x, c.y, c.size);
+  for (const f of flies)  drawFly(f.x, f.y);
+
+  // Obstacles aériens
+  for (const o of (g.sky_obstacles||[])) drawSkyObs(o);
+
+  // Sol
+  ctx.strokeStyle='black'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,GROUND_LINE_Y); ctx.lineTo(WIDTH,GROUND_LINE_Y); ctx.stroke();
+  let dx = g.ground_offset - (DASH_W+DASH_GAP);
+  while (dx < WIDTH) { ctx.fillStyle='rgb(140,120,80)'; ctx.fillRect(dx,GROUND_LINE_Y+4,DASH_W,4); dx+=DASH_W+DASH_GAP; }
+
+  // Obstacles sol
+  for (const o of g.obstacles) { ctx.fillStyle='rgb(200,50,50)'; ctx.fillRect(o.x,GROUND_LINE_Y-o.h,o.w,o.h); }
+
+  // Caca
+  drawPoops();
+
+  // Cheval
+  const hy_draw = Math.floor(g.horse_y);
+  if (g.duck) drawHorseDuck(HORSE_X, hy_draw);
+  else        drawHorse(HORSE_X, hy_draw, g.anim_frame, !g.on_ground);
+
+  // Score
+  if (state === 'playing') {
+    ctx.textAlign='left';
+    ctx.fillStyle='rgb(50,50,50)'; ctx.font='28px sans-serif'; ctx.fillText(`Score : ${g.score}`, WIDTH-200, 44);
+    ctx.fillStyle='rgb(100,80,60)'; ctx.font='22px sans-serif'; ctx.fillText(`Meilleur : ${bestScore}`, WIDTH-200, 72);
+  }
+
+  // Écran démarrage
+  if (state === 'start') {
+    drawHorse(WIDTH/2-30, 230, 0, false);
+    ctx.textAlign='center';
+    ctx.fillStyle='rgb(80,40,0)'; ctx.font='bold 52px sans-serif'; ctx.fillText('HORSE RUNNER', WIDTH/2, 155);
+    ctx.fillStyle='rgb(80,60,40)'; ctx.font='28px sans-serif'; ctx.fillText('Appuie sur une touche pour commencer', WIDTH/2, 200);
+    ctx.font='20px sans-serif'; ctx.fillText('↑ / Espace = sauter  ·  ↓ = se baisser', WIDTH/2, 234);
+    ctx.textAlign='left';
+  }
+
+  // Écran game over
+  if (state === 'gameover') {
+    ctx.textAlign='center';
+    ctx.fillStyle='rgb(200,50,50)'; ctx.font='bold 52px sans-serif'; ctx.fillText('GAME OVER', WIDTH/2, 145);
+    ctx.fillStyle='rgb(50,50,50)'; ctx.font='28px sans-serif'; ctx.fillText(`Score : ${g.score}`, WIDTH/2, 210);
+    ctx.fillStyle='rgb(80,40,0)'; ctx.fillText(`Meilleur : ${bestScore}`, WIDTH/2, 248);
+    ctx.fillStyle='rgb(80,60,40)'; ctx.font='22px sans-serif'; ctx.fillText('Espace ou Entrée pour rejouer', WIDTH/2, 308);
+    ctx.textAlign='left';
+  }
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
