@@ -31,6 +31,8 @@ const OBSTACLE_MIN  = 60;
 const OBSTACLE_MAX  = 120;
 const SKY_MIN       = 130;
 const SKY_MAX       = 220;
+// Nombre de frames minimum entre un obstacle sol et un obstacle aérien (et vice-versa)
+const SAFE_GAP      = 80;
 
 // Géométrie des obstacles aériens
 // On utilise la tête/cou comme zone de collision debout (top = horse_y+2 = 322)
@@ -208,45 +210,6 @@ function drawSkyObs(obs) {
   ctx.fillRect(obs.x, SKY_OBS_BOTTOM-8, obs.w, 8);
 }
 
-// ── Caca ─────────────────────────────────────────────────────
-let poops = [];
-
-function spawnPoop(x, y) {
-  for (let i = 0; i < 2; i++) {
-    poops.push({
-      x:        x + 3 + (Math.random()-0.5)*4,
-      y:        y + 20 + (Math.random()-0.5)*3,
-      vx:      -0.4 - Math.random()*1.2,
-      vy:       (Math.random()-0.5) * 2,
-      r:        2.5 + Math.random()*2,
-      life:     1.0,
-      grounded: false,
-    });
-  }
-}
-
-function updatePoops() {
-  for (const p of poops) {
-    if (!p.grounded) {
-      p.vy += 0.35;
-      p.x  += p.vx;
-      p.y  += p.vy;
-      if (p.y >= GROUND_LINE_Y) { p.y = GROUND_LINE_Y; p.grounded = true; }
-    }
-    p.life -= p.grounded ? 0.014 : 0.007;
-  }
-  poops = poops.filter(p => p.life > 0);
-}
-
-function drawPoops() {
-  for (const p of poops) {
-    ctx.globalAlpha = Math.min(p.life, 0.92);
-    ctx.fillStyle   = 'rgb(101,67,33)';
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-}
-
 // ── État du jeu ──────────────────────────────────────────────
 let bestScore = parseInt(localStorage.getItem('horse_runner_best') || '0');
 
@@ -353,10 +316,6 @@ function loop() {
     }
     if (g.horse_y >= GROUND_Y) { g.horse_y = GROUND_Y; g.vel_y = 0; g.on_ground = true; }
 
-    // Caca pendant le saut
-    if (!g.on_ground && Math.random() < 0.10) spawnPoop(HORSE_X, Math.floor(g.horse_y));
-    updatePoops();
-
     // Sol animé
     g.ground_offset = ((g.ground_offset - g.speed) % (DASH_W+DASH_GAP) + (DASH_W+DASH_GAP)) % (DASH_W+DASH_GAP);
 
@@ -366,6 +325,8 @@ function loop() {
       g.obstacles.push({ x:WIDTH, w:20+Math.floor(Math.random()*21), h:25+Math.floor(Math.random()*31) });
       g.obstacle_timer   = 0;
       g.next_obstacle_in = OBSTACLE_MIN + Math.floor(Math.random()*(OBSTACLE_MAX-OBSTACLE_MIN));
+      // safe area : repousse le prochain obstacle aérien si trop proche
+      g.sky_timer = Math.min(g.sky_timer, Math.max(0, g.next_sky_in - SAFE_GAP));
     }
     for (const o of g.obstacles) o.x -= g.speed;
     g.obstacles = g.obstacles.filter(o => o.x+o.w > 0);
@@ -376,6 +337,8 @@ function loop() {
       g.sky_obstacles.push({ x:WIDTH, w:50+Math.floor(Math.random()*45) });
       g.sky_timer   = 0;
       g.next_sky_in = SKY_MIN + Math.floor(Math.random()*(SKY_MAX-SKY_MIN));
+      // safe area : repousse le prochain obstacle au sol si trop proche
+      g.obstacle_timer = Math.min(g.obstacle_timer, Math.max(0, g.next_obstacle_in - SAFE_GAP));
     }
     for (const o of g.sky_obstacles) o.x -= g.speed;
     g.sky_obstacles = g.sky_obstacles.filter(o => o.x+o.w > 0);
@@ -427,9 +390,6 @@ function loop() {
 
   // Obstacles sol
   for (const o of g.obstacles) { ctx.fillStyle='rgb(200,50,50)'; ctx.fillRect(o.x,GROUND_LINE_Y-o.h,o.w,o.h); }
-
-  // Caca
-  drawPoops();
 
   // Cheval
   const hy_draw = Math.floor(g.horse_y);
